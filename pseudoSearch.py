@@ -3,26 +3,26 @@
 import sys
 import re
 import argparse
-import itertools
-import numpy as np
 import subprocess as sub
 import os
+from os.path import exists
+
 
 def parse_args(parser, argv):
-
     io = parser.add_argument_group("Input/Output")
 
     io.add_argument("--query",
-                    help = "Gene 1",
-                    required = True)
-    io.add_argument("--fasta_list",
-                    help = "Gene 2",
-                    required = True)
+                    help="Query sequence. To search for pseudogenes, query sequence should be",
+                    required=True)
 
-    io.add_argument("--nmer",
-                    help = "Percent Minimum Perfect Match",
-                    required = False,
-                    default = 30)
+    io.add_argument("--reference",
+                    help="Reference sequences.",
+                    required=True)
+
+    io.add_argument("--kmer-length-pct",
+                    help="The minimum k-mer length defined as a percentage of the query sequence length.",
+                    required=False,
+                    default=30)
 
     parser = parser.parse_args(argv)
 
@@ -30,30 +30,31 @@ def parse_args(parser, argv):
 
 
 def supermatcher(query, seq):
-
     with open('query', 'w') as f:
         f.write('>query\n' + query)
 
     with open('seq', 'w') as f:
         f.write('>seq\n' + seq)
 
-    sub.call(['supermatcher', '-asequence', 'query', '-bsequence', 'seq', '-gapopen',  '10', '-gapextend',  '0.5', '-aformat',  'pair',  '-outfile',  'test'])
-    
+    sub.call(
+        ['supermatcher', '-asequence', 'query', '-bsequence', 'seq', '-gapopen', '10', '-gapextend', '0.5', '-aformat',
+         'pair', '-outfile', 'supermatcher-output'])
+
     first = ''
     second = ''
     previous = ''
     last = ''
     count = 0
 
-    with open('test', 'r') as f:
+    with open('supermatcher-output', 'r') as f:
         for line in f:
             line = line.rstrip()
-            
+
             if line.startswith("#"):
                 line = line.replace("# ", '')
                 if line.startswith("Length"):
                     length = re.match(r'^Length..(.*)', line).group(1)
-                
+
                 elif line.startswith("Identity"):
                     identity = re.match(r'^.*\((.*)%\)', line).group(1)
 
@@ -65,7 +66,7 @@ def supermatcher(query, seq):
 
                 elif line.startswith("Score"):
                     score = re.match(r'^.*\s(\d+\.\d+)', line).group(1)
-                    
+
             elif not line.startswith("#") and re.match("^.*\d", line):
                 if count == 0:
                     first = line
@@ -75,10 +76,19 @@ def supermatcher(query, seq):
                     previous = last
                     last = line
                 count += 1
-            
-    
-    query_start = re.match(r'^.*\s(\d+)\s', first).group(1)
-    seq_start = re.match(r'^.*\s(\d+)\s', second).group(1)
+
+    print("Query: " + query)
+    print("Seq: " + seq)
+    print("First: " + first)
+    print("Second: " + second)
+
+    # Ensure supermatcher was able to make a match
+    try:
+        query_start = re.match(r'^.*\s(\d+)\s', first).group(1)
+        seq_start = re.match(r'^.*\s(\d+)\s', second).group(1)
+    except AttributeError:
+        return None
+
 
     # In case the match is only one line
     try:
@@ -88,18 +98,16 @@ def supermatcher(query, seq):
         query_end = re.match(r'^.*\s(\d+)?', first).group(1)
         seq_end = re.match(r'^.*\s(\d+)?', second).group(1)
 
-
     return [query_start, query_end, seq_start, seq_end, length, identity, similarity, gaps, score]
 
 
 def coordinate(match, query, seq, seq_head, cushion):
-    
     # Get coordinates
     g1start = match[0]
     g2start = match[1] - cushion
 
     # Cast into lists
-    #query, seq = list(query), list(seq)
+    # query, seq = list(query), list(seq)
     g1end = g1start + match[2]
     g2end = g2start + match[2] + cushion
 
@@ -107,97 +115,125 @@ def coordinate(match, query, seq, seq_head, cushion):
 
     # set cushion on chromosome
     sub_seq = seq[abs(g2start):g2end]
-    
+
     diff = ""
 
     return [sub_query, sub_seq, g1start, g2start, diff, g1end, g2end, seq_head]
 
 
-def load_kmers(query, lkmer, seq):
-    
-    matches = []
-    s_nmer = 0
+def load_kmers(seq, kmer_length, reference=False, alt_dict=None):
+    # Saving each kmer in hash.
+    kmer_dict = {}
 
-    # matchMer = {}
+    # Parsing through every position of the sequence
+    for i in range(0, len(seq)):
 
+        # Retrieve kmer from dictionary
+        # Sliding window of length kmer_length
+
+        # Prevent sliding window index error
+        if i + kmer_length < len(seq):
+            kmer = seq[i:i + kmer_length]
+        else:
+            kmer = seq[i:len(seq)]
+
+        # If loading kmers for reference sequence...
+        # ...only keep kmers that match query sequence
+        if reference == True:
+            if kmer in alt_dict.keys():
+
+                # Check for kmer in dictionary
+                if kmer not in kmer_dict:
+
+                    # Add kmer to dictionary as a key
+                    # Add the start position of the kmer within the sequence as the value
+                    kmer_dict[kmer] = [i]
+
+                # Add subsequent observations to the kmer count
+                else:
+                    kmer_dict[kmer].append(i)
+
+        # Check for kmer in dictionary
+        elif kmer not in kmer_dict:
+
+            # Add kmer to dictionary as a key
+            # Add the start position of the kmer within the sequence as the value
+            kmer_dict[kmer] = [i]
+
+        # Append multiple start positions of the same kmer
+        else:
+            kmer_dict[kmer].append(i)
+
+    return kmer_dict
+
+
+def match_kmers(kmer_dict, kmer_length, seq):
+    # Initialize and Append Matches
     with open('matches.tsv', 'a') as f:
         if not os.path.exists('matches.tsv'):
             f.write("Query_Start\tMatch_Start\tKmer_Length\n")
-        # Saving each kmer in hash.
-        # for i in range(0, len(query), nmer):
-        # for nmer in range(20, len(query)):
-        for nmer in range(lkmer, len(query)):
-            kmer_dict = {}
-            
-            if nmer % 100 == 0:
-                print("Loading nmer of " + str(nmer))
 
-            for i in range(0, len(query)):
+        matches = []
 
-                # Left over nmers
-                if i + nmer < len(query): 
-                    kmer = query[i:i+nmer]
+        # Random high number
+        highest_match = 999999
 
-                else:
-                    s_nmer = len(query) - i
-                    kmer = query[i:i+s_nmer]
-                if kmer not in kmer_dict:
-                    kmer_dict[kmer] = [i]
-                else:
-                    kmer_dict[kmer].append(i)
-                    
-            highest_match = 999999
-            hit_count = 0
-            # Match Status Initialization
-            m_status = False
+        # kmer match counter
+        hit_count = 0
 
-                
-            # Parse Chromosome for each kmer length of nmer
-            for i in range(0, len(seq), nmer):
-                sub = seq[i:i+nmer]
+        # Match Status Initialization
+        m_status = False
 
-                 # Capture Match
-                if sub in kmer_dict:
+        # Parse Chromosome using a Sliding Window with length of kmer_length
+        for i in range(0, len(seq)):
+            sub = seq[i:i + kmer_length]
 
-                    hit_count += 1
-                    highest_match = nmer
-                    m_status = True
+            # Capture Match
+            if sub in kmer_dict:
 
-                    if hit_count % 10000 == 0:
-                        print("HITS: " + str(hit_count))
+                hit_count += 1
+                highest_match = kmer_length
+                m_status = True  # Boolean to check for matches
 
-                    for hit in kmer_dict[sub]:
-                        matches.append([hit, i, nmer])
-                        try:
-                            f.write(str(hit) + "\t" + str(i) + "\t" + str(nmer) + "\n")
-                        except ValueError:
-                            print(hit)
-                            print(i)
-                            print(nmer)
-                            exit()
+                # Printing update
+                if hit_count % 10000 == 0:
+                    print("HITS: " + str(hit_count))
 
-            # If no matches are found, no need to extend
-            if m_status is False:
-                break
+                # Capture hits
+                for hit in kmer_dict[sub]:
+
+                    # hit: match locus for query
+                    # i: match query for reference
+                    matches.append([hit, i, kmer_length])
+
+                    try:
+                        f.write(str(hit) + "\t" + str(i) + "\t" + str(kmer_length) + "\n")
+                    except ValueError:
+                        print("Value Error - Exiting")
+                        print(hit)
+                        print(i)
+                        print(kmer_length)
+                        exit()
 
     return matches
 
 
 def collapse_matches(matches):
-    
     matches.sort()
 
     dele = False
-    for i in range(len(matches) -1 ):
+
+    ## TODO: Replace this with a while Loop
+    for i in range(len(matches) - 1):
         try:
             # Find intersecting matches
-            while matches[i+1][1] <= matches[i][1] + matches[i][2]:
+            while matches[i + 1][1] <= matches[i][1] + matches[i][2]:
 
                 # Combine intersecting matches
-                matches[i][2] = matches[i][2] + matches[i+1][2]
-            
+                matches[i][2] = matches[i][2] + matches[i + 1][2]
+
                 # After combining recrod 1, delete record 2
-                del matches[i+1]
+                del matches[i + 1]
 
         # Prevents deletions from ruining indexes
         except IndexError:
@@ -206,55 +242,105 @@ def collapse_matches(matches):
     return matches
 
 
-def pseudoSearch(query, fasta_list_fn, nmer):
-
-    
+def pseudoSearch(query, fasta_list_fn, kmer_length):
     """
     Create dictionary of all matching kmers 
     between both genes with the length of 'n'" 
     """
-    
+
     cushion = 500
 
     coord_list = []
     chrom = ""
     seq = ""
+    current = {}
+
+    print("Retrieve all k-mers of length " + str(kmer_length) + " from query")
+    # Retrieve all query k-mers of the length of kmer_length)
+    kmer_dict = load_kmers(query, kmer_length)
+
+    print("Length of Query Dictionary: " + str(len(kmer_dict)))
+
+    ref_fasta = {}
 
     # Stream Reference Sequence
     with open(fasta_list_fn, 'r') as f:
         for line in f:
             line = line.rstrip()
 
-            if line.startswith(">"):
+            # Skipping empty lines
+            if line == "":
+                continue
 
-                chrom = line.replace('>','')
-                                            
+            # Handle headers
+            elif line.startswith(">"):
+                current = line
+
+            # Handle sequences
             else:
-                seq = line.upper()
+                ref_fasta[current] = line
 
-                matches = load_kmers(query, nmer, seq)
-    
-                print("ALL LOADED " + str(nmer) + " on " + chrom)
+                # Skip chunk on the first iteration to initialize current
+                if current != {}:
 
-                matches = collapse_matches(matches)
-                
-                with open("collapsed_matches.tsv", 'a') as fn:
+                    # Retrieve completed nucleotide sequence
+                    ref = current.get(chrom)[0]
 
-                    for match in matches:
-                        coord_list.append(coordinate(match, query, seq, chrom, cushion))
-                        fn.write(str(match[0]) + "\t" + str(match[1]) + "\t" + str(match[2]) + "\n")
+                    if (ref is None):
+                        print("Ref is NONE. Printing Line. Exiting")
+                        print(line)
+                        print(ref)
+                        print(current)
+                        exit()
+
+                    print("Retrieve all k-mers of length " + str(kmer_length) + " from " + chrom)
+
+                    # Retrieve all reference k-mers of the length of kmer_length)
+                    ref_dict = load_kmers(ref, kmer_length, reference=True, alt_dict=kmer_dict)
+
+                    print("Length of Reference Dictionary: " + str(len(ref_dict)))
+
+                    print("Finding k-mer matches between query and reference: " + chrom)
+                    matches = match_kmers(kmer_dict, kmer_length, ref)
+
+                    matches = collapse_matches(matches)
+
+                    # Create a header for the file on the first go around
+                    if not exists("collapsed_matches.tsv"):
+                        with open("collapsed_matches.tsv", 'w') as fn:
+                            fn.write("Query Start\tRef Start\tMatch Length\tChromosome\n")
+
+                    with open("collapsed_matches.tsv", 'a') as fn:
+
+                        for match in matches:
+                            coord_list.append(coordinate(match, query, ref, chrom, cushion))
+                            fn.write(str(match[0]) + "\t" + str(match[1]) + "\t" + str(match[2]) + "\t" + chrom + "\n")
+
+                    current = {chrom: []}
+
+                # Capture Chromosome
+                chrom = line.replace('>', '')
+
+                # Reset Current with Latest chromosome
+                current = {chrom: []}
+
+            # Handle sequence
+            else:
+                # Loading in current fasta record
+                current[chrom].append(line.upper())
+
 
     return coord_list
 
+
 def main(argv):
-
-
     # Parsing Args and Creating Help Dialog
-    parser = argparse.ArgumentParser(description="Finding the Longest kmer")
+    parser = argparse.ArgumentParser(
+        description="Find every k-mer aligned between a query and reference sequence - starting with a k-mer length of 'n' to the length of the query sequence.")
     parser = parse_args(parser, argv)
 
     query_fn = parser.query
-    fasta_list_fn = parser.fasta_list
+    fasta_list_fn = parser.reference
 
     query = ""
 
@@ -265,16 +351,21 @@ def main(argv):
                 line = line.rstrip()
                 query += line
 
-    nmer = int((float(parser.nmer)/100) * len(query))
+    kmer_length = int((float(parser.kmer_length_pct) / 100) * len(query))
     match_list = []
 
-    match_list = pseudoSearch(query, fasta_list_fn, nmer)
+    # Get all matching k-mers between reference and query
+    match_list = pseudoSearch(query, fasta_list_fn, kmer_length)
 
-        
+    print("All K-mers Generated. Checking for Alignment...")
+
     with open(query_fn + '_out.tsv', 'w') as fn:
-        fn.write('Chromosome\tQuery_Start\tQuery_End\tMatch_Start\tMatch_End\tAlign_Length\tIdentity\tSimilarity\tGaps\tScore\n')
+        fn.write(
+            'Chromosome\tQuery_Start\tQuery_End\tMatch_Start\tMatch_End\tAlign_Length\tIdentity\tSimilarity\tGaps\tScore\n')
         for record in match_list:
-            #print(match_list)
+            print("PRINTING MATCH LIST RECORD")
+            print(record)
+            exit()
             query = record[0]
             gene2 = record[1]
             query_start = record[2]
@@ -283,30 +374,33 @@ def main(argv):
             g2end = record[6]
             seq_head = record[7]
 
+            # H = matrix(query, gene2)
+            # ans = traceback(H, gene2)
 
-            #H = matrix(query, gene2)
-            #ans = traceback(H, gene2)
-
-            print("ALIRNGMENT")
             print("QUERY LENGTH: " + str(len(query)))
             print("SEQ LENGTH " + str(len(gene2)))
 
-            # query_start, query_end, g2start, g2end, length, identity, similarity, gaps, score = supermatcher(query, gene2)
+            # query_start, query_end, g2start, g2end, length, identity, similarity, gaps, score = e(query, gene2)
             match_stats = supermatcher(query, gene2)
-            #print(match_stats)
+            # print(match_stats)
+
+            # Skip for empty alignment
+            if match_stats is None:
+                continue
 
             # Adjust for relative seq start position
             match_stats[2] = str(g2start + int(match_stats[2]))
 
             # Adjust for relative seq end position
-            match_stats[3] = str(int(match_stats[2])+ int(match_stats[4]))
+            match_stats[3] = str(int(match_stats[2]) + int(match_stats[4]))
 
             # Add chromosome information
             match_stats = [seq_head] + match_stats
             fn.write('\t'.join(match_stats) + '\n')
 
-            #fn.write(seq_head + "\t" + str(g2start) + "\t" + str(end + g2start) + "\t" + str(g2end-g2start) + "\t" + str(score)+ '\n')
+            # fn.write(seq_head + "\t" + str(g2start) + "\t" + str(end + g2start) + "\t" + str(g2end-g2start) + "\t" + str(score)+ '\n')
 
+    print("Processing Complete!")
 
 if __name__ == '__main__':
     main(sys.argv[1:])

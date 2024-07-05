@@ -6,6 +6,7 @@ import argparse
 import subprocess as sub
 import os
 from os.path import exists
+from alive_progress import alive_bar
 
 
 def parse_args(parser, argv):
@@ -77,16 +78,12 @@ def supermatcher(query, seq):
                     last = line
                 count += 1
 
-    print("Query: " + query)
-    print("Seq: " + seq)
-    print("First: " + first)
-    print("Second: " + second)
-
     # Ensure supermatcher was able to make a match
     try:
         query_start = re.match(r'^.*\s(\d+)\s', first).group(1)
         seq_start = re.match(r'^.*\s(\d+)\s', second).group(1)
     except AttributeError:
+        print("No Match")
         return None
 
 
@@ -113,7 +110,7 @@ def coordinate(match, query, seq, seq_head, cushion):
 
     sub_query = query[g1start:g1end]
 
-    # set cushion on chromosome
+    # set cushion on contig
     sub_seq = seq[abs(g2start):g2end]
 
     diff = ""
@@ -125,53 +122,61 @@ def load_kmers(seq, kmer_length, reference=False, alt_dict=None):
     # Saving each kmer in hash.
     kmer_dict = {}
 
-    # Parsing through every position of the sequence
-    for i in range(0, len(seq)):
+    with alive_bar(len(seq)) as bar:
 
-        # Retrieve kmer from dictionary
-        # Sliding window of length kmer_length
+        # Parsing through every position of the sequence
+        for i in range(0, len(seq)):
 
-        # Prevent sliding window index error
-        if i + kmer_length < len(seq):
-            kmer = seq[i:i + kmer_length]
-        else:
-            kmer = seq[i:len(seq)]
+            # Retrieve kmer from dictionary
+            # Sliding window of length kmer_length
 
-        # If loading kmers for reference sequence...
-        # ...only keep kmers that match query sequence
-        if reference == True:
-            if kmer in alt_dict.keys():
+            bar()
 
-                # Check for kmer in dictionary
-                if kmer not in kmer_dict:
+            # Prevent sliding window index error
+            if i + kmer_length < len(seq):
+                kmer = seq[i:i + kmer_length]
+            else:
+                kmer = seq[i:len(seq)]
 
-                    # Add kmer to dictionary as a key
-                    # Add the start position of the kmer within the sequence as the value
+            # If loading kmers for reference sequence...
+            # ...only keep kmers that match query sequence
+            if reference == True:
+                if kmer in alt_dict.keys():
+
+                    # Check for kmer in dictionary
+                    if kmer not in kmer_dict:
+
+                        # Add kmer to dictionary as a key
+                        # Add the start position of the kmer within the sequence as the value
+                        # Preventing kmers that are too short
+                        if len(kmer) >= kmer_length:
+                            kmer_dict[kmer] = [i]
+
+                    # Add subsequent observations to the kmer count
+                    else:
+                        kmer_dict[kmer].append(i)
+
+            # Check for kmer in dictionary
+            elif kmer not in kmer_dict:
+
+                # Add kmer to dictionary as a key
+                # Add the start position of the kmer within the sequence as the value
+                # Preventing kmers that are too short
+                if len(kmer) >= kmer_length:
                     kmer_dict[kmer] = [i]
 
-                # Add subsequent observations to the kmer count
-                else:
-                    kmer_dict[kmer].append(i)
-
-        # Check for kmer in dictionary
-        elif kmer not in kmer_dict:
-
-            # Add kmer to dictionary as a key
-            # Add the start position of the kmer within the sequence as the value
-            kmer_dict[kmer] = [i]
-
-        # Append multiple start positions of the same kmer
-        else:
-            kmer_dict[kmer].append(i)
+            # Append multiple start positions of the same kmer
+            else:
+                kmer_dict[kmer].append(i)
 
     return kmer_dict
 
 
-def match_kmers(kmer_dict, kmer_length, seq):
+def match_kmers(kmer_dict, kmer_length, seq, contig):
     # Initialize and Append Matches
     with open('matches.tsv', 'a') as f:
         if not os.path.exists('matches.tsv'):
-            f.write("Query_Start\tMatch_Start\tKmer_Length\n")
+            f.write("Query_Start\tMatch_Start\tKmer_Length\tContig\n")
 
         matches = []
 
@@ -184,7 +189,7 @@ def match_kmers(kmer_dict, kmer_length, seq):
         # Match Status Initialization
         m_status = False
 
-        # Parse Chromosome using a Sliding Window with length of kmer_length
+        # Parse Contig using a Sliding Window with length of kmer_length
         for i in range(0, len(seq)):
             sub = seq[i:i + kmer_length]
 
@@ -207,7 +212,7 @@ def match_kmers(kmer_dict, kmer_length, seq):
                     matches.append([hit, i, kmer_length])
 
                     try:
-                        f.write(str(hit) + "\t" + str(i) + "\t" + str(kmer_length) + "\n")
+                        f.write(str(hit) + "\t" + str(i) + "\t" + str(kmer_length) + "\t" + contig + "\n")
                     except ValueError:
                         print("Value Error - Exiting")
                         print(hit)
@@ -254,13 +259,6 @@ def pseudoSearch(query, fasta_list_fn, kmer_length):
     chrom = ""
     seq = ""
     current = {}
-
-    print("Retrieve all k-mers of length " + str(kmer_length) + " from query")
-    # Retrieve all query k-mers of the length of kmer_length)
-    kmer_dict = load_kmers(query, kmer_length)
-
-    print("Length of Query Dictionary: " + str(len(kmer_dict)))
-
     ref_fasta = {}
 
     # Stream Reference Sequence
@@ -280,66 +278,64 @@ def pseudoSearch(query, fasta_list_fn, kmer_length):
             else:
                 ref_fasta[current] = line
 
-                # Skip chunk on the first iteration to initialize current
-                if current != {}:
+    ## TODO Make it so it doesn't have to recalculate all of the matches every time
+    # if exists("collapsed_matches.tsv"):
+    #     with open("collapsed_matches.tsv", 'r') as fc:
+    #         match_stats = csv.reader(fc, delimiter="\t")
 
-                    # Retrieve completed nucleotide sequence
-                    ref = current.get(chrom)[0]
+    print("Retrieve all k-mers of length " + str(kmer_length) + " from query")
 
-                    if (ref is None):
-                        print("Ref is NONE. Printing Line. Exiting")
-                        print(line)
-                        print(ref)
-                        print(current)
-                        exit()
+    # Retrieve all query k-mers of the length of kmer_length)
+    kmer_dict = load_kmers(query, kmer_length)
 
-                    print("Retrieve all k-mers of length " + str(kmer_length) + " from " + chrom)
+    print("Length of Query Dictionary: " + str(len(kmer_dict)))
 
-                    # Retrieve all reference k-mers of the length of kmer_length)
-                    ref_dict = load_kmers(ref, kmer_length, reference=True, alt_dict=kmer_dict)
+    print("Retrieve all k-mers of length " + str(kmer_length) + " from reference")
 
-                    print("Length of Reference Dictionary: " + str(len(ref_dict)))
+    for chrom in ref_fasta.keys():
 
-                    print("Finding k-mer matches between query and reference: " + chrom)
-                    matches = match_kmers(kmer_dict, kmer_length, ref)
+        ref = ref_fasta[chrom]
 
-                    matches = collapse_matches(matches)
+        print("Finding k-mer matches between query and reference: " + chrom)
 
-                    # Create a header for the file on the first go around
-                    if not exists("collapsed_matches.tsv"):
-                        with open("collapsed_matches.tsv", 'w') as fn:
-                            fn.write("Query Start\tRef Start\tMatch Length\tChromosome\n")
+        # Retrieve all reference k-mers of the length of kmer_length)
+        ref_dict = load_kmers(ref, kmer_length, reference=True, alt_dict=kmer_dict)
 
-                    with open("collapsed_matches.tsv", 'a') as fn:
+        print("Length of Reference Dictionary: " + str(len(ref_dict)))
 
-                        for match in matches:
-                            coord_list.append(coordinate(match, query, ref, chrom, cushion))
-                            fn.write(str(match[0]) + "\t" + str(match[1]) + "\t" + str(match[2]) + "\t" + chrom + "\n")
+        if len(ref_dict) > 0:
 
-                    current = {chrom: []}
+            matches = match_kmers(kmer_dict, kmer_length, ref, chrom)
 
-                # Capture Chromosome
-                chrom = line.replace('>', '')
+            print("Collapsing Matches")
+            matches = collapse_matches(matches)
 
-                # Reset Current with Latest chromosome
-                current = {chrom: []}
+            # Create a header for the file on the first go around
+            if not exists("collapsed_matches.tsv"):
+                with open("collapsed_matches.tsv", 'w') as fn:
+                    fn.write("Query_Start\tRef_Start\tMatch_Length\tContig\n")
 
-            # Handle sequence
-            else:
-                # Loading in current fasta record
-                current[chrom].append(line.upper())
+            with open("collapsed_matches.tsv", 'a') as fn:
 
+                for match in matches:
+                    coord_list.append(coordinate(match, query, ref, chrom, cushion))
+                    fn.write(str(match[0]) + "\t" + str(match[1]) + "\t" + str(match[2]) + "\t" + chrom + "\n")
 
-    return coord_list
+        else:
+            print("No kmer matches found. Skipping contig")
+
+    return [coord_list, ref_fasta]
 
 
 def main(argv):
     # Parsing Args and Creating Help Dialog
     parser = argparse.ArgumentParser(
         description="Find every k-mer aligned between a query and reference sequence - starting with a k-mer length of 'n' to the length of the query sequence.")
+
     parser = parse_args(parser, argv)
 
     query_fn = parser.query
+    fasta_list_fn = parser.reference
     fasta_list_fn = parser.reference
 
     query = ""
@@ -355,17 +351,21 @@ def main(argv):
     match_list = []
 
     # Get all matching k-mers between reference and query
-    match_list = pseudoSearch(query, fasta_list_fn, kmer_length)
+    results = pseudoSearch(query, fasta_list_fn, kmer_length)
+    match_list = results[0]
+    ref_fasta = results[1]
+
+    match_list_len = len(match_list)
+    match_list_count = 1
 
     print("All K-mers Generated. Checking for Alignment...")
 
-    with open(query_fn + '_out.tsv', 'w') as fn:
+    with open(query_fn + '_out.tsv', 'w') as fn, open(query_fn + '_global_out.tsv', 'w') as fn2:
         fn.write(
-            'Chromosome\tQuery_Start\tQuery_End\tMatch_Start\tMatch_End\tAlign_Length\tIdentity\tSimilarity\tGaps\tScore\n')
+            'Contig\tQuery_Start\tQuery_End\tMatch_Start\tMatch_End\tAlign_Length\tIdentity\tSimilarity\tGaps\tScore\n')
+        fn2.write(
+            'Contig\tQuery_Start\tQuery_End\tMatch_Start\tMatch_End\tAlign_Length\tIdentity\tSimilarity\tGaps\tScore\n')
         for record in match_list:
-            print("PRINTING MATCH LIST RECORD")
-            print(record)
-            exit()
             query = record[0]
             gene2 = record[1]
             query_start = record[2]
@@ -377,27 +377,44 @@ def main(argv):
             # H = matrix(query, gene2)
             # ans = traceback(H, gene2)
 
+            print("\nRunning Supermatcher for local match " + str(match_list_count) + " out of " +
+                  str(match_list_len) + "\n")
+            print("CONTIG: " + seq_head)
             print("QUERY LENGTH: " + str(len(query)))
             print("SEQ LENGTH " + str(len(gene2)))
 
             # query_start, query_end, g2start, g2end, length, identity, similarity, gaps, score = e(query, gene2)
             match_stats = supermatcher(query, gene2)
-            # print(match_stats)
+
+            print("\nRunning Supermatcher for global match " + str(match_list_count) + " out of " + str(
+                match_list_len) + "\n")
+
+            # Supermatcher alignment with the entire contig
+            g_match_stats = supermatcher(query, ref_fasta[seq_head])
+
+            print("Match Stats: " + '\t'.join(match_stats))
+            print("Global Match Stats: " + '\t'.join(g_match_stats))
 
             # Skip for empty alignment
-            if match_stats is None:
-                continue
+            if match_stats is not None:
 
-            # Adjust for relative seq start position
-            match_stats[2] = str(g2start + int(match_stats[2]))
+                # Adjust for relative seq start position
+                match_stats[2] = str(g2start + int(match_stats[2]))
 
-            # Adjust for relative seq end position
-            match_stats[3] = str(int(match_stats[2]) + int(match_stats[4]))
+                # Adjust for relative seq end position
+                match_stats[3] = str(int(match_stats[2]) + int(match_stats[4]))
 
-            # Add chromosome information
-            match_stats = [seq_head] + match_stats
-            fn.write('\t'.join(match_stats) + '\n')
+                # Add contig information
+                match_stats = [seq_head] + match_stats
+                fn.write('\t'.join(match_stats) + '\n')
 
+            if g_match_stats is not None:
+
+                # Add contig information
+                g_match_stats = [seq_head] + match_stats
+                fn2.write('\t'.join(match_stats) + '\n')
+
+            match_list_count += 1
             # fn.write(seq_head + "\t" + str(g2start) + "\t" + str(end + g2start) + "\t" + str(g2end-g2start) + "\t" + str(score)+ '\n')
 
     print("Processing Complete!")

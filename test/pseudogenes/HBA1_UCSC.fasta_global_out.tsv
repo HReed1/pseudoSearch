@@ -1,0 +1,3 @@
+Contig	Query_Start	Query_End	Match_Start	Match_End	Align_Length	Identity	Similarity	Gaps	Score
+>NC_000016.10 Homo sapiens chromosome 16, GRCh38.p13 Primary Assembly	1	42	172876	172918	42	100.0	100.0	0	210.0
+>NC_000016.10 Homo sapiens chromosome 16, GRCh38.p13 Primary Assembly	1	843	176680	177523	843	100.0	100.0	0	4215.0
